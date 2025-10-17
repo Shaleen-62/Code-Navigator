@@ -2,10 +2,9 @@
 <br>
 CodeNavigator is an interactive tool for analyzing and visualizing Python codebases.  
 It helps developers understand project structure by displaying files, functions, and call dependencies as an interactive directed graph.  
-The application is built using Streamlit for the interface, NetworkX for graph construction, and PyVis for visualization.  
-  
+The application is built using Streamlit for the interface, NetworkX for graph construction, and PyVis for visualization.
 <br>
-  
+<br>
 
 ## Overview
 
