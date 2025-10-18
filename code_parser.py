@@ -1,214 +1,176 @@
 import os
 import ast
 import networkx as nx
-import pickle
+import builtins
 
 class CodeParser:
+    """
+    Parses a Python repo into a call + import dependency graph.
+    Nodes:
+        - file (type="file")
+        - function (type="function")
+    Edges:
+        - file_import (file → imported file)
+        - defined_in (function → file)
+        - calls (function → function)
+    """
+
     def __init__(self, repo_path):
         self.repo_path = repo_path
         self.graph = nx.DiGraph()
+        self.repo_files = []                  # list of .py files (rel paths)
+        self.functions_by_file = {}           # file -> {func_name: ast.FunctionDef}
+        self.imports_by_file = {}             # file -> alias -> module
+        self.from_imports_by_file = {}        # file -> name -> module
+        self.builtin_names = set(dir(builtins))
 
+    # ----------------------------------------------------------
     def parse(self):
+        """Main entry point to build the full graph."""
+        self._collect_files()
+        self._index_functions_and_imports()
+        self._add_function_nodes_and_import_edges()
+        self._resolve_function_calls()
+        return self.graph
+
+    # ----------------------------------------------------------
+    def _collect_files(self):
+        """Walk repo and collect all .py files."""
         for root, _, files in os.walk(self.repo_path):
             for file in files:
                 if file.endswith(".py"):
-                    file_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(file_path, self.repo_path)
-                    self.graph.add_node(rel_path, type="file")
-
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        try:
-                            tree = ast.parse(f.read())
-                            self._parse_ast(tree, rel_path)
-                        except Exception:
-                            continue
-        return self.graph
-    
-    def _parse_ast(self, tree, file_name):
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
-                func_name = f"{node.name}()"
-                unique_id = f"{file_name}::{node.name}"  # internal unique key
-                self.graph.add_node(unique_id, type="function", display_name=func_name, file=file_name)
-                
-                # --- Extract metadata ---
-                doc = ast.get_docstring(node)
-                start = getattr(node, "lineno", 0)
-                end = getattr(node, "end_lineno", start)
-                loc = end - start
-                params = [a.arg for a in node.args.args]
-                
-                # Attach metadata to the node
-                nx.set_node_attributes(
-                    self.graph,
-                    {unique_id: {
-                        "doc": doc or "",
-                        "loc": loc,
-                        "params": params,
-                        "file": file_name,
-                        "display_name": func_name
-                    }}
-                )
-
-                # Link: function → its file
-                self.graph.add_edge(unique_id, file_name, label="defined_in")
-
-                # Link: function → functions it calls
-                for child in ast.walk(node):
-                    if isinstance(child, ast.Call):
-                        # Handle foo(), self.foo(), module.foo()
-                        if isinstance(child.func, ast.Name):
-                            called_func = child.func.id
-                        elif isinstance(child.func, ast.Attribute):
-                            called_func = child.func.attr
-                        else:
-                            continue
-
-                        called_func_name = f"{file_name}::{called_func}()"
-                        self.graph.add_node(called_func_name, type="function")
-                        self.graph.add_edge(unique_id, called_func_name, label="calls")
-
-    '''def _build_file_graph(self):
-        """
-        Build file dependency graph based on import statements.
-        Nodes: file names (relative to repo_path)
-        Edges: fileA imports fileB
-        """
-        files = []
-        for root, _, filenames in os.walk(self.repo_path):
-            for file in filenames:
-                if file.endswith(".py"):
                     full_path = os.path.join(root, file)
                     rel_path = os.path.relpath(full_path, self.repo_path)
-                    files.append(rel_path)
+                    self.repo_files.append(rel_path)
+                    self.graph.add_node(rel_path, type="file", display_name=rel_path)
 
-        # Add file nodes
-        for f in files:
-            self.graph.add_node(f, type="file")
-
-        # Parse imports to add edges
-        for f in files:
-            full_path = os.path.join(self.repo_path, f)
+    # ----------------------------------------------------------
+    def _index_functions_and_imports(self):
+        """Parse AST for each file, record functions and imports."""
+        for rel in self.repo_files:
+            full = os.path.join(self.repo_path, rel)
             try:
-                with open(full_path, "r", encoding="utf-8") as file:
-                    source = file.read()
-                tree = ast.parse(source)
+                with open(full, "r", encoding="utf-8") as f:
+                    src = f.read()
+                tree = ast.parse(src)
             except Exception as e:
-                print(f"Failed to parse {f}: {e}")
+                print(f"Failed to parse {rel}: {e}")
                 continue
 
-            imported_files = self._get_imported_files(tree, files)
-            for imp in imported_files:
-                # edge: f imports imp
-                if imp in files:
-                    self.graph.add_edge(f, imp, type="file_import")'''
+            self.functions_by_file[rel] = {}
+            self.imports_by_file[rel] = {}
+            self.from_imports_by_file[rel] = {}
 
-    def _get_imported_files(self, tree, files):
-        """
-        Extract relative file names from import statements.
-        Only consider files in the repo.
-        """
-        imported = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    mod = alias.name.split('.')[0]
-                    # try to match mod to a file
-                    matched_file = self._match_module_to_file(mod, files)
-                    if matched_file:
-                        imported.add(matched_file)
-            elif isinstance(node, ast.ImportFrom):
-                if node.module:
-                    mod = node.module.split('.')[0]
-                    matched_file = self._match_module_to_file(mod, files)
-                    if matched_file:
-                        imported.add(matched_file)
-        return imported
+            for node in tree.body:
+                # record function definitions
+                if isinstance(node, ast.FunctionDef):
+                    self.functions_by_file[rel][node.name] = node
 
-    def _match_module_to_file(self, module_name, files):
-        """
-        Simple heuristic to match module name to file name.
-        e.g. module 'file2' -> 'file2.py' in repo
-        """
+                # record `import module as alias`
+                elif isinstance(node, ast.Import):
+                    for alias in node.names:
+                        mod = alias.name.split('.')[0]
+                        asname = alias.asname or mod
+                        self.imports_by_file[rel][asname] = mod
+
+                # record `from module import name as alias`
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        mod = node.module.split('.')[0]
+                        for alias in node.names:
+                            asname = alias.asname or alias.name
+                            self.from_imports_by_file[rel][asname] = mod
+
+    # ----------------------------------------------------------
+    def _add_function_nodes_and_import_edges(self):
+        """Create function nodes and file_import edges."""
+        for rel in self.repo_files:
+            funcs = self.functions_by_file.get(rel, {})
+
+            # Add function nodes and link to file
+            # inside _add_function_nodes_and_import_edges()
+            for fname, fnode in funcs.items():
+                uid = f"{rel}::{fname}"
+                display = f"{fname}()"
+                start = getattr(fnode, "lineno", 0)
+                end = getattr(fnode, "end_lineno", start)
+                loc = end - start + 1
+                params = [a.arg for a in fnode.args.args]
+                doc = ast.get_docstring(fnode) or ""
+
+                self.graph.add_node(uid, type="function", display_name=display,
+                                    file=rel, loc=loc, params=params, doc=doc)
+
+                # change direction: file → function
+                self.graph.add_edge(rel, uid, label="defined_in")
+
+                # Add edges for imports that match repo files
+                for alias, module in self.imports_by_file.get(rel, {}).items():
+                    self._add_import_edge(rel, module)
+
+                for name, module in self.from_imports_by_file.get(rel, {}).items():
+                    self._add_import_edge(rel, module)
+
+    # ----------------------------------------------------------
+    def _add_import_edge(self, src_file, module_name):
+        """Link file → file if module_name matches repo file."""
         candidate = module_name + ".py"
-        for f in files:
+        for f in self.repo_files:
             if os.path.basename(f) == candidate:
-                return f
+                self.graph.add_edge(src_file, f, label="file_import")
+
+    # ----------------------------------------------------------
+    def _resolve_function_calls(self):
+        """Walk all function bodies, add call edges."""
+        for rel, funcs in self.functions_by_file.items():
+            for fname, fnode in funcs.items():
+                caller_uid = f"{rel}::{fname}"
+
+                for node in ast.walk(fnode):
+                    if not isinstance(node, ast.Call):
+                        continue
+
+                    callee_uid = self._resolve_callee(node, rel)
+                    if callee_uid and self.graph.has_node(callee_uid):
+                        self.graph.add_edge(caller_uid, callee_uid, label="calls")
+
+    # ----------------------------------------------------------
+    def _resolve_callee(self, node, rel):
+        """Try to resolve a call node to an existing function UID in the repo."""
+        # Case 1: foo()
+        if isinstance(node.func, ast.Name):
+            name = node.func.id
+            # skip builtins
+            if name in self.builtin_names:
+                return None
+            # same file
+            if name in self.functions_by_file.get(rel, {}):
+                return f"{rel}::{name}"
+            # from-imported function
+            elif name in self.from_imports_by_file.get(rel, {}):
+                mod = self.from_imports_by_file[rel][name]
+                matched = self._match_module_to_file(mod)
+                if matched:
+                    return f"{matched}::{name}"
+            return None
+
+        # Case 2: module.func()
+        elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            owner = node.func.value.id
+            attr = node.func.attr
+            # is the owner an imported module?
+            mapped_mod = self.imports_by_file.get(rel, {}).get(owner)
+            if mapped_mod:
+                matched = self._match_module_to_file(mapped_mod)
+                if matched:
+                    return f"{matched}::{attr}"
         return None
 
-    '''def _build_function_graph(self):
-        """
-        Build function-level dependency graph.
-        Nodes: (file, function_name)
-        Edges: functionA calls functionB
-        Also link functions to files.
-        """
-        for node in list(self.graph.nodes(data=True)):
-            if node[1].get("type") == "file":
-                file_node = node[0]
-                full_path = os.path.join(self.repo_path, file_node)
-                try:
-                    with open(full_path, "r", encoding="utf-8") as f:
-                        source = f.read()
-                    tree = ast.parse(source)
-                except Exception as e:
-                    print(f"Failed to parse {file_node} for functions: {e}")
-                    continue
-
-                # Find all functions in the file
-                funcs = {}
-                for item in tree.body:
-                    if isinstance(item, ast.FunctionDef):
-                        funcs[item.name] = item
-
-                # Add function nodes and edges
-                for func_name, func_node in funcs.items():
-                    func_id = (file_node, func_name)
-                    self.graph.add_node(func_id, type="function", file=file_node)
-
-                    # Link function to file (edge)
-                    self.graph.add_edge(file_node, func_id, type="file_contains")
-
-                    # Find function calls inside this function
-                    calls = self._find_function_calls(func_node)
-                    for call in calls:
-                        # Attempt to resolve call to (file, function) if possible
-                        target_func_id = self._resolve_function_call(call, file_node)
-                        if target_func_id:
-                            self.graph.add_edge(func_id, target_func_id, type="function_calls")'''
-
-    def _find_function_calls(self, func_node):
-        """
-        Return list of function names called inside this function.
-        """
-        calls = set()
-        for node in ast.walk(func_node):
-            if isinstance(node, ast.Call):
-                # handle calls like foo(), self.foo(), module.foo()
-                if isinstance(node.func, ast.Name):
-                    calls.add(node.func.id)
-                elif isinstance(node.func, ast.Attribute):
-                    calls.add(node.func.attr)
-        return calls
-
-    def _resolve_function_call(self, call_name, current_file):
-        """
-        Try to resolve function call to a function node (file, func)
-        Simple heuristic:
-          - If function defined in current file, return that
-          - Else check imported files for that function
-          - Else return None
-        """
-        # Check if function is in current file
-        candidate = (current_file, call_name)
-        if self.graph.has_node(candidate):
-            return candidate
-
-        # Check functions in files imported by current_file
-        imported_files = [tgt for src, tgt, data in self.graph.out_edges(current_file, data=True) if data.get("type") == "file_import"]
-        for imp_file in imported_files:
-            candidate = (imp_file, call_name)
-            if self.graph.has_node(candidate):
-                return candidate
-
+    # ----------------------------------------------------------
+    def _match_module_to_file(self, module_name):
+        """Find the repo file corresponding to a module name."""
+        candidate = module_name + ".py"
+        for f in self.repo_files:
+            if os.path.basename(f) == candidate:
+                return f
         return None
