@@ -3,12 +3,13 @@ import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from code_parser import CodeParser
-from graph_utils import generate_graph_html, get_callers, get_callees
+from graph_utils import *
 from chat_manager import init_db, save_message, get_chat_history, register_codebase, list_codebases, delete_codebase
 import hashlib
 import pickle
 import tempfile
 import subprocess
+import networkx as nx
 
 # --- Utilities ---
 def hash_codebase(repo_path):
@@ -221,6 +222,20 @@ def main():
     except Exception as e:
         st.error(f"Failed to load codebase: {e}")
         return
+    
+    st.sidebar.markdown("### 🔍 Semantic Query")
+    query_type = st.sidebar.selectbox("Query Type", ["Variable Updates", "Call Chain"])
+    query_input = st.sidebar.text_input("Enter name or UID")
+
+    if query_input:
+        if query_type == "Variable Updates":
+            results = parser.find_variable_updates(query_input)
+        else:
+            results = parser.find_call_chain(query_input)
+
+        st.write("### Results")
+        st.write(results or "No results found.")
+
 
     # Layout: two equal columns
     col1, col2 = st.columns([1, 1])
@@ -242,8 +257,31 @@ def main():
     # Right column: graph
     with col2:
         st.header("Code Dependency Graph")
-        html = generate_graph_html(graph)
+        layer_option = st.sidebar.radio("Graph Layer", ["Files", "Classes & Methods", "Full Semantic View"])
+        if layer_option == "Files":
+            html = generate_file_layer(graph)
+        elif layer_option == "Classes & Methods":
+            html = generate_class_method_layer(graph)
+        else:
+            html = generate_full_semantic_layer(graph)
+
         components.html(html, height=800, scrolling=True)
+        
+        print("Total nodes:", len(graph.nodes))
+        print("Total edges:", len(graph.edges))
+        print("\nNode types count:")
+        from collections import Counter
+        types = Counter(nx.get_node_attributes(graph, "type").values())
+        for t, count in types.items():
+            print(f"  {t}: {count}")
+
+        print("\nSample edges (label → count):")
+        edge_labels = [d.get("label") for _, _, d in graph.edges(data=True)]
+        for lbl, count in Counter(edge_labels).most_common():
+            print(f"  {lbl}: {count}")
+
+        #html = generate_graph_html(graph)
+        #components.html(html, height=800, scrolling=True)
 
 
 if __name__ == "__main__":
