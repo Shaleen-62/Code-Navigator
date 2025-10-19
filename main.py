@@ -3,15 +3,29 @@ import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from code_parser import CodeParser
-from graph_utils import *
-from chat_manager import init_db, save_message, get_chat_history, register_codebase, list_codebases, delete_codebase
+from graph_utils import (
+    generate_file_layer,
+    generate_class_method_layer,
+    generate_graph_html,
+    generate_full_semantic_layer,
+)
+from chat_manager import (
+    init_db,
+    save_message,
+    get_chat_history,
+    register_codebase,
+    list_codebases,
+    delete_codebase,
+)
 import hashlib
 import pickle
 import tempfile
 import subprocess
 import networkx as nx
 
-# --- Utilities ---
+# ------------------------------------------------------------
+# Utility functions
+# ------------------------------------------------------------
 def hash_codebase(repo_path):
     sha = hashlib.sha256()
     for root, _, files in os.walk(repo_path):
@@ -19,20 +33,16 @@ def hash_codebase(repo_path):
             file_path = os.path.join(root, f)
             try:
                 with open(file_path, "rb") as file:
-                    while True:
-                        chunk = file.read(4096)
-                        if not chunk:
-                            break
+                    while chunk := file.read(4096):
                         sha.update(chunk)
             except Exception:
-                # skip unreadable files (binaries, permissions, etc.)
                 pass
     return sha.hexdigest()
 
 
 def get_local_repo_path(path_or_url):
     """
-    If the input is a GitHub URL, clone it to a temporary dir and return that path.
+    If input is a GitHub URL, clone it to a temporary dir.
     Otherwise, return absolute local path.
     """
     if not path_or_url:
@@ -41,35 +51,31 @@ def get_local_repo_path(path_or_url):
     path_or_url = path_or_url.strip()
     if path_or_url.startswith(("http://", "https://")):
         if "github.com" not in path_or_url:
-            raise ValueError("Only GitHub URLs are supported at the moment.")
+            raise ValueError("Only GitHub URLs are supported.")
         tmp_dir = tempfile.mkdtemp(prefix="repo_")
         with st.spinner("Cloning GitHub repository..."):
             try:
-                subprocess.run(["git", "clone", path_or_url, tmp_dir], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(
+                    ["git", "clone", path_or_url, tmp_dir],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
             except subprocess.CalledProcessError as e:
-                # remove temp dir if clone failed
-                try:
-                    if os.path.exists(tmp_dir):
-                        import shutil
-                        shutil.rmtree(tmp_dir)
-                except Exception:
-                    pass
-                raise ValueError("Failed to clone repository. Ensure the URL is public and git is installed.") from e
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                raise ValueError("Failed to clone repository.") from e
         return tmp_dir
-    # local path
     if not os.path.exists(path_or_url):
-        raise ValueError(f"Local path does not exist: {path_or_url}")
+        raise ValueError(f"Local path not found: {path_or_url}")
     return os.path.abspath(path_or_url)
 
 
 def load_or_parse_graph(repo_path):
     """
-    Return (codebase_id, graph, parsed_flag).
-    parsed_flag is True if parsing occurred now; False if loaded from cache.
+    Returns (codebase_id, graph, parsed_flag).
+    parsed_flag=True if freshly parsed, else loaded from cache.
     """
-    if not os.path.exists(repo_path):
-        raise ValueError(f"Repo path not found: {repo_path}")
-
     codebase_id = hash_codebase(repo_path)
     os.makedirs("cache", exist_ok=True)
     cache_file = os.path.join("cache", f"{codebase_id}.pkl")
@@ -78,210 +84,196 @@ def load_or_parse_graph(repo_path):
         try:
             with open(cache_file, "rb") as f:
                 graph = pickle.load(f)
-            parsed = False
+            return codebase_id, graph, False
         except Exception:
-            # cache corrupted; reparse and overwrite
-            parser = CodeParser(repo_path)
-            graph = parser.parse()
-            with open(cache_file, "wb") as f:
-                pickle.dump(graph, f)
-            parsed = True
-    else:
-        parser = CodeParser(repo_path)
-        graph = parser.parse()
-        with open(cache_file, "wb") as f:
-            pickle.dump(graph, f)
-        parsed = True
+            pass  # fall through to reparse
 
-    return codebase_id, graph, parsed
+    parser = CodeParser(repo_path)
+    graph = parser.parse()
+    with open(cache_file, "wb") as f:
+        pickle.dump(graph, f)
+    return codebase_id, graph, True
 
 
+# ------------------------------------------------------------
+# Query processor
+# ------------------------------------------------------------
 def process_query(graph, query):
     """
-    Very small natural-language-ish processor that supports:
-    - show info for <func>
-    - details of <func>
-    - functions in <file>
-    - <func> called by ...
-    - <func> calls ...
+    Mini NLQ processor:
+      - show info for <func>
+      - functions in <file>
+      - <func> calls ...
+      - <func> called by ...
     """
     if not graph:
         return "No codebase graph loaded."
 
     q = (query or "").lower().strip()
+    if not q:
+        return "Empty query."
 
-    # metadata queries
+    # --- function info ---
     if q.startswith("show info for") or q.startswith("details of"):
-        # assume last token is function name (like foo or foo())
-        func = query.split()[-1].strip()
-        # match by display name or by raw node id substring
-        matches = [n for n, a in graph.nodes(data=True) if a.get("type") == "function" and (a.get("display_name") == func or func in a.get("display_name", "") or func in n)]
+        func = query.split()[-1].replace("()", "").strip()
+        matches = [
+            n
+            for n, a in graph.nodes(data=True)
+            if a.get("type") == "function" and func in a.get("display_name", "")
+        ]
+        if not matches:
+            return f"No function named '{func}' found."
+        node = matches[0]
+        a = graph.nodes[node]
+        return (
+            f"### {a.get('display_name')}\n"
+            f"**File:** {a.get('file','?')}\n"
+            f"**LOC:** {a.get('loc','?')}\n"
+            f"**Params:** {a.get('params','[]')}\n"
+            f"**Docstring:** {a.get('doc','(none)')}"
+        )
+
+    # --- list functions in file ---
+    if q.startswith("functions in"):
+        file = query.split("functions in")[-1].strip()
+        matches = [
+            n for n, a in graph.nodes(data=True)
+            if a.get("type") == "function" and a.get("file") and file in a.get("file")
+        ]
+        if not matches:
+            return f"No functions found in file '{file}'."
+        return "Functions:\n" + "\n".join(f"- {graph.nodes[m]['display_name']}" for m in matches)
+
+    # --- calls / called by ---
+    tokens = q.split()
+    if "calls" in tokens:
+        func = tokens[0].replace("()", "")
+        matches = [n for n, a in graph.nodes(data=True)
+                   if a.get("type") == "function" and func in a.get("display_name", "")]
         if not matches:
             return f"No function matching '{func}' found."
         func_node = matches[0]
-        attrs = graph.nodes[func_node]
-        info = f"Function: {attrs.get('display_name', func_node)}\n"
-        info += f"File: {attrs.get('file','?')}\n"
-        info += f"Docstring: {attrs.get('doc','(none)')}\n"
-        info += f"LOC: {attrs.get('loc','?')}\n"
-        info += f"Params: {attrs.get('params','[]')}\n"
-        return info
+        callees = [
+            dst for _, dst, d in graph.out_edges(func_node, data=True)
+            if d.get("label") == "calls"
+        ]
+        if not callees:
+            return f"'{func}' does not call any other function."
+        return f"'{func}' calls:\n" + "\n".join(f"- {graph.nodes[c]['display_name']}" for c in callees)
 
-    # functions in a file
-    if "functions in" in q or "defined in" in q:
-        # take text after 'in'
-        parts = query.lower().split("in")
-        if len(parts) < 2:
-            return "Please say: 'functions in <filename>'"
-        file_name = parts[-1].strip()
-        matches = [a.get("display_name", n) for n, a in graph.nodes(data=True) if a.get("type") == "function" and os.path.basename(a.get("file", "")) == file_name]
-        return "\n".join(matches) if matches else f"No functions found in `{file_name}`."
-
-    # call relationships
     if "called by" in q:
-        func = query.split("called by")[-1].strip()
-        # find matching node by display_name
-        matches = [n for n, a in graph.nodes(data=True) if a.get("type") == "function" and (a.get("display_name") == func or func in a.get("display_name",""))]
+        func = q.split("called by")[0].strip().replace("()", "")
+        matches = [n for n, a in graph.nodes(data=True)
+                   if a.get("type") == "function" and func in a.get("display_name", "")]
         if not matches:
-            return f"Function `{func}` not found."
+            return f"No function matching '{func}' found."
         func_node = matches[0]
-        callers = get_callers(graph, func_node)
-        # display caller display_names where available
-        readable = [graph.nodes[c].get("display_name", str(c)) for c in callers]
-        return "\n".join(readable) if readable else f"No callers found for `{func}`."
+        callers = [
+            src for src, _, d in graph.in_edges(func_node, data=True)
+            if d.get("label") == "calls"
+        ]
+        if not callers:
+            return f"'{func}' is not called by any function."
+        return f"'{func}' is called by:\n" + "\n".join(f"- {graph.nodes[c]['display_name']}" for c in callers)
 
-    if "calls" in q or "callees" in q:
-        func = query.split("calls")[-1].strip()
-        matches = [n for n, a in graph.nodes(data=True) if a.get("type") == "function" and (a.get("display_name") == func or func in a.get("display_name",""))]
-        if not matches:
-            return f"Function `{func}` not found."
-        func_node = matches[0]
-        callees = get_callees(graph, func_node)
-        readable = [graph.nodes[c].get("display_name", str(c)) for c in callees]
-        return "\n".join(readable) if readable else f"No callees found for `{func}`."
-
-    return "Query not recognized. Try: 'show info for foo', 'functions in file.py', 'foo called by', or 'foo calls'."
+    return "Query not understood. Try: 'show info for foo', 'functions in file.py', 'foo calls', 'foo called by'."
 
 
-# --- Main App ---
+# ------------------------------------------------------------
+# Streamlit UI
+# ------------------------------------------------------------
 def main():
+    st.set_page_config(page_title="Codebase Navigator", layout="wide")
     load_dotenv()
-    st.set_page_config(page_title="Code Navigator", layout="wide")
     init_db()
-    st.title("Code Navigator")
 
-    # --- Sidebar: codebase management ---
+    st.title("Codebase Navigator")
+
+    # Sidebar: codebase management
     st.sidebar.header("Codebases")
-    codebases = list_codebases()  # returns list of (id, name, path)
-    options = [f"{name} ({path})" for _, name, path in codebases]
-    id_map = {f"{name} ({path})": cid for cid, name, path in codebases}
 
-    # Add new codebase
-    st.sidebar.subheader("Add New Codebase")
-    new_path = st.sidebar.text_input("Enter local folder path or GitHub URL:")
-    if st.sidebar.button("Add Codebase"):
-        if new_path and new_path.strip():
-            try:
-                real_path = get_local_repo_path(new_path.strip())
-                codebase_id, graph, parsed = load_or_parse_graph(real_path)
-                register_codebase(codebase_id, os.path.basename(real_path), real_path)
-                st.sidebar.success(f"Added: {os.path.basename(real_path)}")
-                st.rerun()
-            except Exception as e:
-                st.sidebar.error(f"Failed to add codebase: {e}")
-        else:
-            st.sidebar.warning("Please enter a valid path or GitHub URL.")
+    # Add / load / delete
+    code_input = st.sidebar.text_input("Enter local path or GitHub URL:")
+    if st.sidebar.button("Load Codebase"):
+        try:
+            repo_path = get_local_repo_path(code_input)
+            codebase_id, graph, parsed = load_or_parse_graph(repo_path)
+            register_codebase(codebase_id, os.path.basename(repo_path), repo_path)
+            st.session_state["graph"] = graph
+            st.session_state["codebase_id"] = codebase_id
+            st.sidebar.success(f"Loaded: {os.path.basename(repo_path)}")
+        except Exception as e:
+            st.sidebar.error(str(e))
 
-    st.sidebar.divider()
+    # List registered codebases
+    codebases = list_codebases()
+    if codebases:
+        selected = st.sidebar.selectbox(
+            "Select existing codebase:",
+            options=[(cid, name, path) for cid, name, path in codebases],
+            format_func=lambda x: x[1],
+        )
+        if st.sidebar.button("Load Selected"):
+            cid, name, path = selected
+            _, graph, _ = load_or_parse_graph(path)
+            st.session_state["graph"] = graph
+            st.session_state["codebase_id"] = cid
+            st.sidebar.success(f"Loaded cached: {name}")
 
-    # If there are no codebases yet
-    if not options:
-        st.sidebar.info("No codebases yet. Add one above to get started.")
-        return
+        if st.sidebar.button("Delete Selected"):
+            cid, name, _ = selected
+            delete_codebase(cid)
+            st.sidebar.warning(f"Deleted {name}")
 
-    # Select an existing codebase
-    selected = st.sidebar.selectbox("Select codebase", options)
-    codebase_id = id_map[selected]
-    repo_path = [p for (cid, n, p) in codebases if cid == codebase_id][0]
+    st.sidebar.markdown("---")
 
-    # Delete button for selected
-    if st.sidebar.button("Delete this codebase"):
-        delete_codebase(codebase_id)
-        cache_file = os.path.join("cache", f"{codebase_id}.pkl")
-        if os.path.exists(cache_file):
-            try:
-                os.remove(cache_file)
-            except Exception:
-                pass
-        st.sidebar.success("Codebase deleted. Please reload.")
-        st.stop()
+    # --------------------------------------------------------
+    # Visualization
+    # --------------------------------------------------------
+    graph = st.session_state.get("graph")
+    if graph:
+        st.subheader("Visualization Layers")
+        layer = st.radio(
+            "Select layer view:",
+            ["File Layer", "Class/Method Layer", "Full Semantic Layer"],
+            horizontal=True,
+        )
 
-    # Load cached graph (or parse if missing)
-    try:
-        codebase_id, graph, parsed = load_or_parse_graph(repo_path)
-    except Exception as e:
-        st.error(f"Failed to load codebase: {e}")
-        return
-    
-    st.sidebar.markdown("### 🔍 Semantic Query")
-    query_type = st.sidebar.selectbox("Query Type", ["Variable Updates", "Call Chain"])
-    query_input = st.sidebar.text_input("Enter name or UID")
+        with st.spinner("Rendering graph..."):
+            if layer == "File Layer":
+                html = generate_file_layer(graph)
+            elif layer == "Class/Method Layer":
+                html = generate_class_method_layer(graph)
+            else:
+                html = generate_full_semantic_layer(graph)
+            components.html(html, height=850, scrolling=True)
 
-    if query_input:
-        if query_type == "Variable Updates":
-            results = parser.find_variable_updates(query_input)
-        else:
-            results = parser.find_call_chain(query_input)
+    # --------------------------------------------------------
+    # Chat / Query Section
+    # --------------------------------------------------------
+    st.markdown("---")
+    st.subheader("Chat / Query")
 
-        st.write("### Results")
-        st.write(results or "No results found.")
+    if "codebase_id" in st.session_state:
+        cid = st.session_state["codebase_id"]
+        history = get_chat_history(cid)
+        for role, msg, ts in history:
+            with st.chat_message(role):
+                st.markdown(msg)
 
+        if query := st.chat_input("Ask about this codebase..."):
+            # show user message immediately
+            with st.chat_message("user"):
+                st.markdown(query)
+            save_message(cid, "user", query)
 
-    # Layout: two equal columns
-    col1, col2 = st.columns([1, 1])
-
-    # Left column: chat
-    with col1:
-        st.header("Chat with Codebase")
-        history = get_chat_history(codebase_id)
-        for role, msg, _ in history:
-            st.chat_message(role).write(msg)
-
-        if user_query := st.chat_input("Ask a question about the codebase..."):
-            st.chat_message("user").write(user_query)
-            response = process_query(graph, user_query)
-            st.chat_message("assistant").write(response)
-            save_message(codebase_id, "user", user_query)
-            save_message(codebase_id, "assistant", response)
-
-    # Right column: graph
-    with col2:
-        st.header("Code Dependency Graph")
-        layer_option = st.sidebar.radio("Graph Layer", ["Files", "Classes & Methods", "Full Semantic View"])
-        if layer_option == "Files":
-            html = generate_file_layer(graph)
-        elif layer_option == "Classes & Methods":
-            html = generate_class_method_layer(graph)
-        else:
-            html = generate_full_semantic_layer(graph)
-
-        components.html(html, height=800, scrolling=True)
-        
-        print("Total nodes:", len(graph.nodes))
-        print("Total edges:", len(graph.edges))
-        print("\nNode types count:")
-        from collections import Counter
-        types = Counter(nx.get_node_attributes(graph, "type").values())
-        for t, count in types.items():
-            print(f"  {t}: {count}")
-
-        print("\nSample edges (label → count):")
-        edge_labels = [d.get("label") for _, _, d in graph.edges(data=True)]
-        for lbl, count in Counter(edge_labels).most_common():
-            print(f"  {lbl}: {count}")
-
-        #html = generate_graph_html(graph)
-        #components.html(html, height=800, scrolling=True)
+            # process + show response
+            response = process_query(st.session_state["graph"], query)
+            save_message(cid, "assistant", response)
+            with st.chat_message("assistant"):
+                st.markdown(response)
+    else:
+        st.info("Load a codebase to start querying.")
 
 
 if __name__ == "__main__":
