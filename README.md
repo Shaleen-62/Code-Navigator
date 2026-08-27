@@ -2,7 +2,7 @@
 
 An interactive tool for exploring and understanding Python codebases as a graph. Point it at a
 local path or a GitHub URL, and it statically parses every `.py` file (via Python's `ast`
-module — nothing is executed), builds a directed graph of files, classes, functions, and their
+module - nothing is executed), builds a directed graph of files, classes, functions, and their
 call relationships with NetworkX, and renders it as an interactive, explorable network with PyVis.
 
 ## Why
@@ -14,17 +14,17 @@ files; switch between a high-level file view and a full call-graph view.
 
 ## Features
 
-- **Load from anywhere** — point at a local directory or paste a GitHub URL; remote repos are
+- **Load from anywhere** - point at a local directory or paste a GitHub URL; remote repos are
   cloned automatically.
-- **Three visualization layers** — File Layer (module-level relationships), Class/Method Layer,
+- **Three visualization layers** - File Layer (module-level relationships), Class/Method Layer,
   and Full Semantic Layer (every function + call edge), each rendered as an interactive PyVis
   graph embedded in the app.
-- **Content-addressed caching** — each codebase is hashed (SHA-256 over file contents), and its
+- **Content-addressed caching** - each codebase is hashed (SHA-256 over file contents), and its
   parsed graph is pickled to `cache/`. Reopening the same codebase loads instantly instead of
   re-parsing.
-- **Multi-codebase workspace** — a sidebar lets you register, switch between, and delete
+- **Multi-codebase workspace** - a sidebar lets you register, switch between, and delete
   multiple parsed codebases without losing their cached graphs.
-- **Built-in query interface** — a lightweight, rule-based natural-language query box (no LLM
+- **Built-in query interface** - a lightweight, rule-based natural-language query box (no LLM
   calls) answers structural questions directly from the graph: `show info for <function>`,
   `functions in <file>`, `<function> calls`, `<function> called by`. Queries and answers are
   persisted per codebase in a local SQLite chat history, so you can pick up a session where you
@@ -32,13 +32,13 @@ files; switch between a high-level file view and a full call-graph view.
 
 ## How it works
 
-- **Static analysis (`ast`)** — parses each file without executing it, extracting function
+- **Static analysis (`ast`)** - parses each file without executing it, extracting function
   definitions, calls, and cross-file relationships (`code_parser.py`).
-- **Graph construction (NetworkX)** — builds a directed graph connecting files, classes, and
+- **Graph construction (NetworkX)** - builds a directed graph connecting files, classes, and
   functions through `calls` and `defined_in` edges (`graph_utils.py`).
-- **Visualization (PyVis)** — renders the graph as an interactive HTML canvas, embedded directly
+- **Visualization (PyVis)** - renders the graph as an interactive HTML canvas, embedded directly
   in the Streamlit app.
-- **Query + history (SQLite)** — `chat_manager.py` persists registered codebases and per-codebase
+- **Query + history (SQLite)** - `chat_manager.py` persists registered codebases and per-codebase
   Q&A history, and answers structural queries by walking the in-memory graph.
 
 ## Repository layout
