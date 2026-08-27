@@ -1,138 +1,83 @@
-# Code-Navigator
-<br>
-CodeNavigator is an interactive tool for analyzing and visualizing Python codebases.  
-It helps developers understand project structure by displaying files, functions, and call dependencies as an interactive directed graph.  
-The application is built using Streamlit for the interface, NetworkX for graph construction, and PyVis for visualization.
-<br>
-<br>
+# CodeNavigator
 
-## Overview
+An interactive tool for exploring and understanding Python codebases as a graph. Point it at a
+local path or a GitHub URL, and it statically parses every `.py` file (via Python's `ast`
+module — nothing is executed), builds a directed graph of files, classes, functions, and their
+call relationships with NetworkX, and renders it as an interactive, explorable network with PyVis.
 
-CodeNavigator performs static analysis of Python source files to extract:
-- Function definitions
-- Function calls
-- Cross-file relationships
+## Why
 
-It then generates an interactive network graph that allows users to explore how different components of a project are connected.
-<br>
-<br>
+Jumping into an unfamiliar codebase usually means grepping for function names and manually
+tracing imports. CodeNavigator turns that into a graph you can visually explore: hover a
+function to see its signature, docstring, and line count; follow call/defined-in edges between
+files; switch between a high-level file view and a full call-graph view.
 
 ## Features
 
-- **Repository Parsing**  
-  Recursively scans and parses Python projects to extract functions and their relationships.
+- **Load from anywhere** — point at a local directory or paste a GitHub URL; remote repos are
+  cloned automatically.
+- **Three visualization layers** — File Layer (module-level relationships), Class/Method Layer,
+  and Full Semantic Layer (every function + call edge), each rendered as an interactive PyVis
+  graph embedded in the app.
+- **Content-addressed caching** — each codebase is hashed (SHA-256 over file contents), and its
+  parsed graph is pickled to `cache/`. Reopening the same codebase loads instantly instead of
+  re-parsing.
+- **Multi-codebase workspace** — a sidebar lets you register, switch between, and delete
+  multiple parsed codebases without losing their cached graphs.
+- **Built-in query interface** — a lightweight, rule-based natural-language query box (no LLM
+  calls) answers structural questions directly from the graph: `show info for <function>`,
+  `functions in <file>`, `<function> calls`, `<function> called by`. Queries and answers are
+  persisted per codebase in a local SQLite chat history, so you can pick up a session where you
+  left off.
 
-- **Interactive Visualization**  
-  Visualize call graphs interactively using PyVis:
-  - Hover over nodes to view docstrings, parameters, and line counts.
-  - Pan and zoom freely.
-  - Filter or focus on specific nodes.
+## How it works
 
-- **File and Function Relationship Mapping**  
-  - Blue dashed arrows represent `calls` relationships between functions.
-  - Orange solid arrows represent `defined_in` relationships connecting functions to their source files.
+- **Static analysis (`ast`)** — parses each file without executing it, extracting function
+  definitions, calls, and cross-file relationships (`code_parser.py`).
+- **Graph construction (NetworkX)** — builds a directed graph connecting files, classes, and
+  functions through `calls` and `defined_in` edges (`graph_utils.py`).
+- **Visualization (PyVis)** — renders the graph as an interactive HTML canvas, embedded directly
+  in the Streamlit app.
+- **Query + history (SQLite)** — `chat_manager.py` persists registered codebases and per-codebase
+  Q&A history, and answers structural queries by walking the in-memory graph.
 
-- **Persistent Codebase Storage**  
-  Once a codebase is parsed, it can be stored in the database and re-used for queries without reprocessing.
+## Repository layout
 
-- **Efficient and Modular Design**  
-  Clear separation of parsing, graph construction, and visualization logic.
-
-<br>
-<br>
-
-## Project Structure
-
-CodeNavigator/<br>
-├── main.py                 # Streamlit application entry point<br>
-├── parser.py               # Parses Python code using AST<br>
-├── graph_builder.py        # Builds NetworkX graph from parsed data<br>
-├── visualizer.py           # Generates PyVis graph visualization<br>
-├── utils/<br>
-│   ├── file_utils.py       # File and path utilities<br>
-│   └── filters.py          # Search and filtering logic<br>
-├── tests/<br>
-│   ├── test_parser.py<br>
-│   ├── test_graph_builder.py<br>
-│   └── test_visualizer.py<br>
-├── requirements.txt<br>
-└── README.md<br>
-<br>
-<br>
- 
-
+```
+Code-Navigator/
+├── main.py             # Streamlit app: sidebar, visualization, query UI
+├── code_parser.py       # AST-based static analysis → graph nodes/edges
+├── graph_utils.py        # NetworkX graph construction + PyVis layer rendering
+├── chat_manager.py       # SQLite-backed codebase registry + chat history
+├── cache/                 # Pickled parsed graphs, keyed by content hash
+├── test_repo/              # Sample repo used for local testing
+└── requirements.txt
+```
 
 ## Installation
 
-### 1. Clone the repository
+```bash
+git clone https://github.com/Shaleen-62/Code-Navigator.git
+cd Code-Navigator
 
-```
-git clone https://github.com/<your-username>/CodeNavigator.git
-cd CodeNavigator
-```
-
-### 2. Create a virtual environmet
-
-```
 python -m venv venv
-source venv/bin/activate   # Linux / Mac
-venv\Scripts\activate      # Windows
-```
+source venv/bin/activate    # Windows: venv\Scripts\activate
 
-### 3. Install dependencies
-
-```
 pip install -r requirements.txt
 ```
-<br>
-<br>
 
 ## Usage
 
-### 1. Run the Streamlit app
-
-```
+```bash
 streamlit run main.py
 ```
 
-### 2. Steps
+1. In the sidebar, enter a local path or GitHub URL and click **Load Codebase**.
+2. Pick a visualization layer (File / Class-Method / Full Semantic).
+3. Hover any node to see its function signature, file, line count, and docstring.
+4. Use the query box at the bottom to ask structural questions about the loaded codebase.
 
-1. **Select or upload a Python project directory.**  
-2. **CodeNavigator parses all `.py` files recursively.**  
-3. **View the generated graph in your browser.**  
-4. **Hover on nodes to see:**
-   - Function signatures  
-   - Line count (LOC)  
-   - Docstring (truncated)  
-   - Containing file  
-<br>
-<br>
+## Tech
 
-## How It Works
-
-- **Static Analysis (AST)**
-Uses Python's built-in `ast` module to safely parse files without executing code.
-
-- **Graph Construction (NetworkX)**
-Builds a directed graph connecting files and functions through defined relationships.
-
-- **Visualization (PyVis)**
-Renders the graph as an interactive HTML canvas embedded within Streamlit.
-
-- **Database Integration**
-Parsed codebases are stored for future queries without reprocessing.
-<br>
-<br>
-
-## Dependencies
-
-| Library   | Purpose |
-|------------|----------|
-| Streamlit  | User interface framework |
-| NetworkX   | Graph construction and traversal |
-| PyVis      | Interactive graph visualization |
-| ast        | Static code analysis |
-| pathlib, os, io | File management and parsing utilities |
-
-
-
+Streamlit (UI), NetworkX (graph model), PyVis (interactive visualization), Python `ast`
+(static analysis), SQLite (codebase registry + query history).
